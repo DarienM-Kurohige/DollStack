@@ -1,45 +1,201 @@
-name: Pruebas unitarias y cobertura
+
+name: EduTech CI-CD
 
 on:
   push:
-    branches: [main]
+    branches:
+      - develop
+      - main
+
   pull_request:
-    branches: [main]
+    branches:
+      - main
+
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  unitarias:
+  ci:
+    name: Validacion CI-CD
     runs-on: ubuntu-latest
+    timeout-minutes: 35
 
     steps:
-      - name: Obtener código del repositorio
-        uses: actions/checkout@v4
+      - name: Validar origen del Pull Request
+        if: github.event_name == 'pull_request'
+        env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "El PR debe provenir del mismo repositorio."
+            exit 1
+          fi
+
+      - name: Descargar codigo fuente
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Configurar Node.js
-        uses: actions/setup-node@v4
+      - name: Configurar Node.js 22
+        uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: "22"
+          cache: "npm"
 
       - name: Instalar dependencias
-        run: npm ci --ignore-scripts
+        run: npm ci
 
       - name: Ejecutar pruebas y cobertura
-        run: npm run test:ci
+        run: npm run test:coverage
 
-      - name: Analizar código con SonarQube
-        if: github.event_name == 'push'
+      - name: Compilar aplicacion
+        run: npm run build
+
+      - name: Verificar artefactos
+        run: |
+          test -s coverage/lcov.info
+          test -s dist/server.cjs
+
+      - name: SonarCloud y Quality Gate
+        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
         uses: SonarSource/sonarqube-scan-action@v8.3.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
 
-      - name: Guardar reporte de cobertura
+      - name: Instalar Snyk CLI
+        run: npm install -g snyk
+
+      - name: Snyk - Analisis general
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          status=0
+
+          snyk test --dev \
+            --json-file-output=snyk-report.json || status=$?
+
+          if [ "$status" -gt 1 ]; then
+            exit "$status"
+          fi
+
+      - name: Snyk - Bloqueo de vulnerabilidades criticas
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          snyk test --dev --severity-threshold=critical
+
+      - name: Construir imagen Docker
+        run: |
+          docker build --pull -t edutech-labs:ci .
+
+      
+      - name: Validar funcionamiento del contenedor
+        shell: bash
+        run: |
+          docker run -d \
+            --name edutech-ci \
+            -p 127.0.0.1:8080:3000 \
+            edutech-labs:ci
+
+          trap 'docker logs edutech-ci; docker rm -f edutech-ci' EXIT
+
+          echo "Esperando disponibilidad de la aplicacion..."
+
+          ready=false
+
+          for intento in $(seq 1 30); do
+            if curl --fail --silent --show-error \
+              --max-time 3 \
+              http://127.0.0.1:8080/health \
+              | jq -e '.status == "ok"'; then
+              ready=true
+              break
+            fi
+
+            echo "Intento $intento: servicio no disponible"
+            sleep 2
+          done
+
+          if [ "$ready" != "true" ]; then
+            echo "ERROR: La aplicacion no inicio correctamente"
+            docker ps -a
+            exit 1
+          fi
+
+          echo "Servicio disponible. Validando API..."
+
+          curl --fail --silent --show-error \
+            --max-time 10 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"presentes":8,"total":10}' \
+            http://127.0.0.1:8080/api/asistencia \
+            | jq -e '.porcentaje == 80 and .cumple == true'
+
+          echo "Validacion HTTP completada correctamente"
+
+      - name: Docker Scout - Autenticacion
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_SCOUT_TOKEN }}
+
+      
+      - name: Docker Scout - Analisis general
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: local://edutech-labs:ci
+          exit-code: false
+          summary: true
+          write-comment: false
+
+      - name: Docker Scout - Bloqueo de vulnerabilidades criticas
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: local://edutech-labs:ci
+          only-severities: critical
+          exit-code: true
+          summary: true
+          write-comment: false
+
+
+      - name: Cerrar sesion de analisis
+        run: docker logout
+
+      - name: Guardar reportes de calidad y seguridad
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cobertura-jest
-          path: coverage/
+          name: reportes-edutech
+          path: |
+            coverage/
+            snyk-report.json
           if-no-files-found: warn
+          retention-days: 14
+
+      - name: Autenticar publicacion en Docker Hub
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Publicar imagen validada
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          IMAGE="$DOCKERHUB_USERNAME/edutech-labs"
+
+          docker tag edutech-labs:ci "$IMAGE:$GITHUB_SHA"
+          docker tag edutech-labs:ci "$IMAGE:latest"
+
+          docker push "$IMAGE:$GITHUB_SHA"
+          docker push "$IMAGE:latest"

@@ -38,3 +38,8 @@ describe('Clasificación', () => {
     expect(clasificarPedido(9000)).toBe('pequeno');
   });
 });
+describe("Despacho fuera de la Region Metropolitana", () => {
+  test("cobra tarifa regional para compras menores", () => {
+    expect(calcularDespacho(10000, "Valparaiso")).toBe(5990);
+  });
+});
