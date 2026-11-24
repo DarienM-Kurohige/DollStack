@@ -93,7 +93,9 @@ jobs:
         run: |
           docker build --pull -t edutech-labs:ci .
 
+      
       - name: Validar funcionamiento del contenedor
+        shell: bash
         run: |
           docker run -d \
             --name edutech-ci \
@@ -102,17 +104,40 @@ jobs:
 
           trap 'docker logs edutech-ci; docker rm -f edutech-ci' EXIT
 
-          curl --fail --silent --show-error \
-            --retry 10 --retry-connrefused \
-            --retry-delay 2 --max-time 10 \
-            http://127.0.0.1:8080/health
+          echo "Esperando disponibilidad de la aplicacion..."
+
+          ready=false
+
+          for intento in $(seq 1 30); do
+            if curl --fail --silent --show-error \
+              --max-time 3 \
+              http://127.0.0.1:8080/health \
+              | jq -e '.status == "ok"'; then
+              ready=true
+              break
+            fi
+
+            echo "Intento $intento: servicio no disponible"
+            sleep 2
+          done
+
+          if [ "$ready" != "true" ]; then
+            echo "ERROR: La aplicacion no inicio correctamente"
+            docker ps -a
+            exit 1
+          fi
+
+          echo "Servicio disponible. Validando API..."
 
           curl --fail --silent --show-error \
+            --max-time 10 \
             -X POST \
             -H "Content-Type: application/json" \
             -d '{"presentes":8,"total":10}' \
             http://127.0.0.1:8080/api/asistencia \
             | jq -e '.porcentaje == 80 and .cumple == true'
+
+          echo "Validacion HTTP completada correctamente"
 
       - name: Docker Scout - Autenticacion
         uses: docker/login-action@v4
