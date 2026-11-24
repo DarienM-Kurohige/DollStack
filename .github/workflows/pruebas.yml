@@ -145,6 +145,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_SCOUT_TOKEN }}
 
+      
       - name: Docker Scout - Analisis general
         uses: docker/scout-action@v1
         with:
@@ -152,6 +153,7 @@ jobs:
           image: local://edutech-labs:ci
           exit-code: false
           summary: true
+          write-comment: false
 
       - name: Docker Scout - Bloqueo de vulnerabilidades criticas
         uses: docker/scout-action@v1
@@ -161,6 +163,8 @@ jobs:
           only-severities: critical
           exit-code: true
           summary: true
+          write-comment: false
+
 
       - name: Cerrar sesion de analisis
         run: docker logout
