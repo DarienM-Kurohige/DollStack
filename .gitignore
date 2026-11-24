@@ -6,3 +6,6 @@ coverage/
 *.log
 .sonar/
 .scannerwork/
+dist/
+.env
+.env.*
