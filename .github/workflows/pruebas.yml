@@ -62,7 +62,7 @@ jobs:
 
       - name: SonarCloud y Quality Gate
         if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
-        uses: SonarSource/sonarqube-scan-action@v8.3.0
+        uses: SonarSource/sonarqube-scan-action@v8.5.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
